@@ -8,8 +8,8 @@ interface DereferenceItem extends Required<OpenAPIV3.OperationObject> {}
 type SchemaType<T> = T extends 'array'
   ? OpenAPIV3.ArraySchemaObject
   : T extends 'object'
-  ? OpenAPIV3.NonArraySchemaObject
-  : OpenAPIV3.SchemaObject
+    ? OpenAPIV3.NonArraySchemaObject
+    : OpenAPIV3.SchemaObject
 
 type SchemaItem<T extends 'array' | 'object' | void = void> = Omit<SchemaType<T>, 'required'> & {
   /** 字段名 */
@@ -210,8 +210,11 @@ export class OpenAPIV3Parser extends BaseParser {
     }
 
     if (schema.type === 'array') {
-      const { required, ...val } = schema
-      return this.parseArray({ ...val, name, required: requiredBoolean, itemsRequiredNamesList: required })
+      const { required, items, ...val } = schema
+      return this.parseArray(
+        { ...val, name, items, required: requiredBoolean, itemsRequiredNamesList: required },
+        (items as any)?.$ref
+      )
     } else {
       const { required, ...val } = schema
       return this.parseObject({ ...val, name, required: requiredBoolean, itemsRequiredNamesList: required })
@@ -219,9 +222,10 @@ export class OpenAPIV3Parser extends BaseParser {
   }
 
   /** 解析数组 */
-  parseArray(arrayItem: SchemaItem<'array'>): TreeInterfacePropertiesItem {
+  parseArray(arrayItem: SchemaItem<'array'>, parentRef?: string): TreeInterfacePropertiesItem {
     const { type, description } = arrayItem
     const items = this.dereferenceSchema(arrayItem.items) || {}
+    const $ref: string | undefined = (arrayItem.items as OpenAPIV3.ReferenceObject).$ref
 
     const { type: itemsType, ...itemsData } = items
 
@@ -242,13 +246,17 @@ export class OpenAPIV3Parser extends BaseParser {
       return itemSchema
     }
 
+    if (parentRef === $ref) {
+      return itemSchema
+    }
+
     if (itemsType === 'array') {
-      return this.parseArray(itemSchema as SchemaItem<'array'>)
+      return this.parseArray(itemSchema as SchemaItem<'array'>, $ref)
     } else {
       if (items.required) {
         itemSchema.itemsRequiredNamesList = items.required
       }
-      return this.parseObject(itemSchema as SchemaItem<'object'>)
+      return this.parseObject(itemSchema as SchemaItem<'object'>, $ref)
     }
   }
 
@@ -260,20 +268,24 @@ export class OpenAPIV3Parser extends BaseParser {
     }
 
     if (res.properties) {
-      res.item = this.parseProperties(properties, itemsRequiredNamesList)
+      res.item = this.parseProperties(properties, itemsRequiredNamesList, parentRef)
       return res
     }
 
     if (allOf && allOf.length === 1) {
       const allOfSingleSchema = this.dereferenceSchema(allOf[0])
       if (!allOfSingleSchema) return res
-      res.item = this.parseProperties(allOfSingleSchema.properties, itemsRequiredNamesList)
+      res.item = this.parseProperties(allOfSingleSchema.properties, itemsRequiredNamesList, parentRef)
     }
 
     return res
   }
 
-  parseProperties(properties: OpenAPIV3.BaseSchemaObject['properties'], itemsRequiredNamesList?: string[]) {
+  parseProperties(
+    properties: OpenAPIV3.BaseSchemaObject['properties'],
+    itemsRequiredNamesList?: string[],
+    parentRef?: string
+  ) {
     const arr: TreeInterfacePropertiesItem[] = []
     for (const name in properties) {
       const schemaSource = properties[name] as OpenAPIV3.ReferenceObject
@@ -283,12 +295,15 @@ export class OpenAPIV3Parser extends BaseParser {
         continue
       }
 
-      if (propertiesSchema.refCount && propertiesSchema.refCount > 1000) {
-        log.error(`${localize.getLocalize('text.config.maxReferenceCount')}:${propertiesSchema.refCount} <${name}>`)
+      if (propertiesSchema.refCount && propertiesSchema.refCount > 200) {
+        log.error(
+          `${localize.getLocalize('text.config.maxReferenceCount')}:${propertiesSchema.refCount} <${name}>`,
+          true
+        )
         continue
+      } else {
+        arr.push(this.parseSchemaObject(propertiesSchema, name, itemsRequiredNamesList))
       }
-
-      arr.push(this.parseSchemaObject(propertiesSchema, name, itemsRequiredNamesList))
     }
     return arr
   }
@@ -338,6 +353,7 @@ export class OpenAPIV3Parser extends BaseParser {
 
       return res
     } else {
+      schema.refCount = (schema.refCount || 0) + 1
       return schema as any
     }
   }
